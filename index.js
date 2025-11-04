@@ -15,5 +15,14 @@
  * limitations under the License.
  */
 
-const { createConnection } = require('playwright/lib/mcp/index');
+const { installNetworkMonitoring } = require('./src/network/install');
+const { createConnection: upstreamCreateConnection } = require('playwright/lib/mcp/index');
+
+installNetworkMonitoring();
+
+async function createConnection(userConfig = {}, contextGetter) {
+  installNetworkMonitoring();
+  return upstreamCreateConnection(userConfig, contextGetter);
+}
+
 module.exports = { createConnection };

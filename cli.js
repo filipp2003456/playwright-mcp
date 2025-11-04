@@ -17,6 +17,9 @@
 
 const { program } = require('playwright-core/lib/utilsBundle');
 const { decorateCommand } = require('playwright/lib/mcp/program');
+const { installNetworkMonitoring } = require('./src/network/install');
+
+installNetworkMonitoring();
 
 const packageJSON = require('./package.json');
 const p = program.version('Version ' + packageJSON.version).name('Playwright MCP');
