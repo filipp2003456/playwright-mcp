@@ -4,7 +4,7 @@ const { Context } = require("../shim/context");
 const browserToolsModule = require("../shim/tools");
 const browserTools = browserToolsModule.browserTools || browserToolsModule;
 const networkTools = require("./tools");
-const { attachPage, detachPage, resetContext } = require("./state");
+const { attachPage, detachPage, resetContext, configureNetworkLimitsFromEnv } = require("./state");
 
 let installed = false;
 
@@ -12,6 +12,7 @@ function installNetworkMonitoring() {
   if (installed)
     return;
 
+  configureNetworkLimitsFromEnv();
   patchContextLifecycle();
   for (const tool of networkTools)
     browserTools.push(tool);

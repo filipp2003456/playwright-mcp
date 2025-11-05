@@ -11,8 +11,9 @@ class PageTracker {
     this.page = options.page;
     this.pageId = options.pageId;
     this.storage = options.storage;
-    this.maxBodyLength = options.maxBodyLength ?? 64 * 1024;
-    this.maxPostDataLength = options.maxPostDataLength ?? 32 * 1024;
+    const limits = options.limits || {};
+    this.maxBodyBytes = limits.maxResponseBodyBytes ?? 64 * 1024;
+    this.maxPostDataBytes = limits.maxRequestBodyBytes ?? 32 * 1024;
     this.monitorId = `monitor-${++trackerCounter}`;
     this._disposed = false;
 
@@ -55,7 +56,7 @@ class PageTracker {
       this.latestUrl = safePageUrl(this.page);
       this.latestTitle = safePageTitle(this.page);
 
-      const { value: requestBody, truncated: requestBodyTruncated } = safeTruncate(() => request.postData(), this.maxPostDataLength);
+      const requestBody = extractRequestBody(request, this.maxPostDataBytes);
 
       const record = this.storage.saveRequest({
         pageId: this.pageId,
@@ -67,13 +68,17 @@ class PageTracker {
         isNavigationRequest: request.isNavigationRequest(),
         frameUrl: safeFrameUrl(request),
         requestHeaders: safeClone(request.headers?.()),
-        requestBody,
-        requestBodyTruncated,
+        requestBody: requestBody.value,
+        requestBodyTruncated: requestBody.truncated,
+        requestBodyBytes: requestBody.savedBytes,
+        requestBodySize: requestBody.originalBytes,
         status: null,
         statusText: null,
         responseHeaders: null,
         responseBody: null,
         responseBodyTruncated: false,
+        responseBodyBytes: 0,
+        responseBodySize: 0,
         responseBodyError: null,
         timing: null,
         error: null
@@ -98,7 +103,7 @@ class PageTracker {
       const contentType = getHeader(response.headers(), "content-type");
       const status = response.status();
       const statusText = response.statusText();
-      const bodyResult = await this._readResponseBody(response, contentType);
+      const bodyResult = await this._readResponseBody(response);
       const timing = safeTiming(response);
 
       this.storage.updateRequest(requestId, {
@@ -107,6 +112,8 @@ class PageTracker {
         responseHeaders: safeClone(response.headers?.()),
         responseBody: bodyResult.body,
         responseBodyTruncated: bodyResult.truncated,
+        responseBodyBytes: bodyResult.savedBytes,
+        responseBodySize: bodyResult.originalBytes,
         responseBodyError: bodyResult.error,
         contentType,
         timing,
@@ -136,16 +143,21 @@ class PageTracker {
     }
   }
 
-  async _readResponseBody(response, contentType) {
+  async _readResponseBody(response) {
     try {
       const text = await response.text();
       if (typeof text !== "string")
-        return { body: null, truncated: false, error: null };
-      const truncated = text.length > this.maxBodyLength;
-      const body = truncated ? text.slice(0, this.maxBodyLength) : text;
-      return { body, truncated, error: null };
+        return { body: null, truncated: false, error: null, savedBytes: 0, originalBytes: 0 };
+      const body = truncateByBytes(text, this.maxBodyBytes);
+      return {
+        body: body.value,
+        truncated: body.truncated,
+        error: null,
+        savedBytes: body.savedBytes,
+        originalBytes: body.originalBytes
+      };
     } catch (error) {
-      return { body: null, truncated: false, error: error?.message || String(error) };
+      return { body: null, truncated: false, error: error?.message || String(error), savedBytes: 0, originalBytes: 0 };
     }
   }
 }
@@ -220,17 +232,45 @@ function safeTiming(response) {
   }
 }
 
-function safeTruncate(producer, maxLength) {
+function extractRequestBody(request, maxBytes) {
   try {
-    const value = producer();
-    if (!value || typeof value !== "string")
-      return { value: value ?? null, truncated: false };
-    if (value.length > maxLength)
-      return { value: value.slice(0, maxLength), truncated: true };
-    return { value, truncated: false };
+    const value = request.postData();
+    if (!value || typeof value !== "string") {
+      if (value == null)
+        return { value: null, truncated: false, savedBytes: 0, originalBytes: 0 };
+      const serialized = String(value);
+      const bytes = Buffer.byteLength(serialized);
+      return { value: serialized, truncated: false, savedBytes: bytes, originalBytes: bytes };
+    }
+    const truncated = truncateByBytes(value, maxBytes);
+    return truncated;
   } catch {
-    return { value: null, truncated: false };
+    return { value: null, truncated: false, savedBytes: 0, originalBytes: 0 };
   }
+}
+
+function truncateByBytes(text, maxBytes) {
+  if (typeof text !== "string")
+    return { value: text ?? null, truncated: false, savedBytes: 0, originalBytes: 0 };
+  const buffer = Buffer.from(text);
+  const originalBytes = buffer.length;
+  if (!maxBytes || maxBytes <= 0) {
+    return {
+      value: "",
+      truncated: originalBytes > 0,
+      savedBytes: 0,
+      originalBytes
+    };
+  }
+  if (originalBytes <= maxBytes)
+    return { value: text, truncated: false, savedBytes: originalBytes, originalBytes };
+  const sliced = buffer.subarray(0, maxBytes);
+  return {
+    value: sliced.toString(),
+    truncated: true,
+    savedBytes: sliced.length,
+    originalBytes
+  };
 }
 
 module.exports = {

@@ -2,10 +2,11 @@
 
 const { z } = require("../shim/sdk");
 const { defineTool } = require("../shim/tool");
-const { getRequestStorage, getTrackedPages } = require("./state");
+const { getRequestStorage, getTrackedPages, getLimits } = require("./state");
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
+const KB = 1024;
 
 const getRequestsTool = defineTool({
   capability: "core-network",
@@ -20,21 +21,22 @@ const getRequestsTool = defineTool({
       method: z.string().describe("HTTP method").optional(),
       status: z.number().int().describe("HTTP status").optional(),
       resourceType: z.string().describe("Resource type from Playwright").optional(),
-      since: z.union([z.number(), z.string()]).describe("Return requests after this timestamp").optional(),
-      search: z.string().describe("Case-insensitive search in URL and bodies").optional(),
+      since: z.any().describe("Return requests after this timestamp. Accepts ms since epoch (e.g. 1730796000000) or an ISO string (e.g. \"2025-11-05T11:00:00Z\"). Pass inside JSON object.").optional(),
+      search: z.string().describe("Case-insensitive search in URL or bodies (plain text/regex). Wildcards are not supported here; use urlPattern for \"*\" matching.").optional(),
       limit: z.number().int().positive().max(MAX_LIMIT).describe("Maximum number of requests to return (default 50)").optional()
     })
   },
   handle: async (context, params, response) => {
     const storage = getRequestStorage(context);
     const limit = params.limit ?? DEFAULT_LIMIT;
+    const normalizedSince = normalizeSince(params.since);
     const { results, total } = storage.queryRequests({
       pageId: params.pageId,
       urlPattern: params.urlPattern,
       method: params.method,
       status: params.status,
       resourceType: params.resourceType,
-      since: params.since,
+      since: normalizedSince,
       search: params.search,
       limit
     });
@@ -109,6 +111,23 @@ const getStatsTool = defineTool({
   }
 });
 
+const getUsageTool = defineTool({
+  capability: "core-network",
+  schema: {
+    name: "browser_network_get_usage",
+    title: "Network storage usage",
+    description: "Shows how much memory the recorded network data uses",
+    type: "readOnly",
+    inputSchema: z.object({})
+  },
+  handle: async (context, _params, response) => {
+    const storage = getRequestStorage(context);
+    const usage = storage.getUsage();
+    const limits = getLimits();
+    response.addResult(renderUsageReport(usage, limits));
+  }
+});
+
 function renderEmptyResult(filters) {
   const lines = ["No requests match the current filters."];
   if (filters.pageId)
@@ -131,6 +150,8 @@ function renderRequests(requests, total, limit) {
   lines.push(`Showing ${requests.length} of ${total} request(s).`);
   if (requests.length === limit)
     lines.push(`Use "limit" to see more (max ${MAX_LIMIT}).`);
+  if (requests.some(hasTruncation))
+    lines.push("* cut req/resp — saved/original size in KB");
   lines.push("");
   for (const request of requests) {
     const parts = [];
@@ -146,11 +167,28 @@ function renderRequests(requests, total, limit) {
       parts.push(request.resourceType);
     parts.push(request.url);
     const duration = typeof request.durationMs === "number" ? ` (${Math.round(request.durationMs)} ms)` : "";
-    lines.push(`- ${parts.join(" | ")}${duration}`);
+    const cutInfo = renderCutInfo(request);
+    const suffix = cutInfo ? ` ${cutInfo}` : "";
+    lines.push(`- ${parts.join(" | ")}${duration}${suffix}`);
     if (request.pageId)
       lines.push(`  page: ${request.pageId} (${request.pageTitle || request.pageUrl || ""})`);
   }
   return lines.join("\n");
+}
+
+function renderCutInfo(request) {
+  const parts = [];
+  if (request.requestBodyTruncated)
+    parts.push(`req ${formatKB(request.requestBodyBytes)}/${formatKB(request.requestBodySize)} KB`);
+  if (request.responseBodyTruncated)
+    parts.push(`resp ${formatKB(request.responseBodyBytes)}/${formatKB(request.responseBodySize)} KB`);
+  if (!parts.length)
+    return "";
+  return `[cut ${parts.join(" | ")}]`;
+}
+
+function hasTruncation(request) {
+  return Boolean(request.requestBodyTruncated || request.responseBodyTruncated);
 }
 
 function renderRequestDetails(request) {
@@ -174,6 +212,10 @@ function renderRequestDetails(request) {
     lines.push(`- resourceType: ${request.resourceType}`);
   if (request.frameUrl)
     lines.push(`- frame: ${request.frameUrl}`);
+
+  if (hasTruncation(request)) {
+    lines.push(`- storage: req ${formatKB(request.requestBodyBytes)}/${formatKB(request.requestBodySize)} KB, resp ${formatKB(request.responseBodyBytes)}/${formatKB(request.responseBodySize)} KB`);
+  }
 
   lines.push("");
   if (request.requestHeaders)
@@ -215,6 +257,9 @@ function renderStats(stats, pages) {
   lines.push("");
   lines.push("### Requests per page");
   lines.push(renderPerPage(stats.byPage));
+  lines.push("");
+  lines.push("### Storage usage");
+  lines.push(renderUsageLines(stats.usage, getLimits()));
   return lines.join("\n");
 }
 
@@ -252,11 +297,59 @@ function formatTiming(timing) {
   return lines.join("\n");
 }
 
+function renderUsageReport(usage, limits) {
+  const lines = [];
+  lines.push(`Requests stored: ${usage.totalRequests}`);
+  lines.push(`Estimated memory: ${formatMB(usage.estimatedMemoryBytes)} MB (${formatKB(usage.estimatedMemoryBytes)} KB)`);
+  lines.push(`Request bodies: ${formatKB(usage.requestBytes)} KB saved / ${formatKB(usage.requestOriginalBytes)} KB original (truncated ${usage.requestTruncated})`);
+  lines.push(`Response bodies: ${formatKB(usage.responseBytes)} KB saved / ${formatKB(usage.responseOriginalBytes)} KB original (truncated ${usage.responseTruncated})`);
+  lines.push(`Current limits: request ${formatKB(limits.maxRequestBodyBytes)} KB, response ${formatKB(limits.maxResponseBodyBytes)} KB`);
+  return lines.join("\n");
+}
+
+function renderUsageLines(usage, limits) {
+  return [
+    `- Estimated memory: ${formatMB(usage.estimatedMemoryBytes)} MB (${formatKB(usage.estimatedMemoryBytes)} KB)`,
+    `- Request bodies: ${formatKB(usage.requestBytes)} KB saved / ${formatKB(usage.requestOriginalBytes)} KB original (truncated ${usage.requestTruncated})`,
+    `- Response bodies: ${formatKB(usage.responseBytes)} KB saved / ${formatKB(usage.responseOriginalBytes)} KB original (truncated ${usage.responseTruncated})`,
+    `- Limits: request ${formatKB(limits.maxRequestBodyBytes)} KB, response ${formatKB(limits.maxResponseBodyBytes)} KB`
+  ].join("\n");
+}
+
+function formatKB(bytes) {
+  if (!bytes)
+    return "0";
+  return Math.max(1, Math.round(bytes / KB)).toString();
+}
+
+function formatMB(bytes) {
+  if (!bytes)
+    return "0.0";
+  return (bytes / (1024 * 1024)).toFixed(2);
+}
+
+function normalizeSince(value) {
+  if (value === undefined || value === null || value === "")
+    return undefined;
+  if (typeof value === "number")
+    return value;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed)
+      return undefined;
+    if (/^\d+$/.test(trimmed))
+      return Number(trimmed);
+    return trimmed;
+  }
+  throw new Error('Parameter "since" must be number (milliseconds since epoch) or ISO string, e.g. 1730796000000 or "2025-11-05T11:00:00Z".');
+}
+
 module.exports = [
   getRequestsTool,
   getRequestDetailsTool,
   clearRequestsTool,
-  getStatsTool
+  getStatsTool,
+  getUsageTool
 ];
 
 

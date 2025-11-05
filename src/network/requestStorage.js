@@ -14,6 +14,14 @@ class RequestStorage {
       timestamp: Date.now(),
       ...data
     };
+    if (typeof record.requestBodyBytes !== "number")
+      record.requestBodyBytes = record.requestBody ? Buffer.byteLength(record.requestBody) : 0;
+    if (typeof record.requestBodySize !== "number")
+      record.requestBodySize = record.requestBodyBytes;
+    if (typeof record.responseBodyBytes !== "number")
+      record.responseBodyBytes = record.responseBody ? Buffer.byteLength(record.responseBody) : 0;
+    if (typeof record.responseBodySize !== "number")
+      record.responseBodySize = record.responseBodyBytes;
     this.requests.set(requestId, record);
     return record;
   }
@@ -23,6 +31,14 @@ class RequestStorage {
     if (!existing)
       return null;
     Object.assign(existing, patch);
+    if (patch.responseBody !== undefined && typeof existing.responseBodyBytes !== "number")
+      existing.responseBodyBytes = existing.responseBody ? Buffer.byteLength(existing.responseBody) : 0;
+    if (patch.responseBodySize !== undefined && typeof existing.responseBodySize !== "number")
+      existing.responseBodySize = patch.responseBodySize;
+    if (patch.requestBody !== undefined && typeof existing.requestBodyBytes !== "number")
+      existing.requestBodyBytes = existing.requestBody ? Buffer.byteLength(existing.requestBody) : 0;
+    if (patch.requestBodySize !== undefined && typeof existing.requestBodySize !== "number")
+      existing.requestBodySize = patch.requestBodySize;
     return existing;
   }
 
@@ -133,7 +149,8 @@ class RequestStorage {
       byStatus: {},
       byResourceType: {},
       byPage: {},
-      activeMonitors: this.activePageMonitors.size
+      activeMonitors: this.activePageMonitors.size,
+      usage: this.getUsage()
     };
 
     for (const request of this.requests.values()) {
@@ -155,6 +172,41 @@ class RequestStorage {
     }
 
     return stats;
+  }
+
+  getUsage() {
+    let requestBytes = 0;
+    let responseBytes = 0;
+    let requestOriginalBytes = 0;
+    let responseOriginalBytes = 0;
+    let requestTruncated = 0;
+    let responseTruncated = 0;
+
+    for (const entry of this.requests.values()) {
+      const reqSaved = entry.requestBodyBytes || 0;
+      const reqOriginal = entry.requestBodySize ?? reqSaved;
+      const resSaved = entry.responseBodyBytes || 0;
+      const resOriginal = entry.responseBodySize ?? resSaved;
+      requestBytes += reqSaved;
+      requestOriginalBytes += reqOriginal;
+      responseBytes += resSaved;
+      responseOriginalBytes += resOriginal;
+      if (entry.requestBodyTruncated)
+        requestTruncated++;
+      if (entry.responseBodyTruncated)
+        responseTruncated++;
+    }
+
+    return {
+      totalRequests: this.requests.size,
+      requestBytes,
+      requestOriginalBytes,
+      requestTruncated,
+      responseBytes,
+      responseOriginalBytes,
+      responseTruncated,
+      estimatedMemoryBytes: requestBytes + responseBytes
+    };
   }
 }
 

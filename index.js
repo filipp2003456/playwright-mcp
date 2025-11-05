@@ -16,12 +16,15 @@
  */
 
 const { installNetworkMonitoring } = require('./src/network/install');
+const { configureNetworkLimits } = require('./src/network/state');
 const { createConnection: upstreamCreateConnection } = require('playwright/lib/mcp/index');
 
 installNetworkMonitoring();
 
 async function createConnection(userConfig = {}, contextGetter) {
   installNetworkMonitoring();
+  if (userConfig && userConfig.networkMonitor)
+    configureNetworkLimits(userConfig.networkMonitor);
   return upstreamCreateConnection(userConfig, contextGetter);
 }
 
